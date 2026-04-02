@@ -1,16 +1,59 @@
 from __future__ import annotations
 
+import logging
 import lzma
 import pickle
+from dataclasses import replace
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from tqdm import tqdm
 
 from navsim.common.dataclasses import AgentInput, Scene, SceneFilter, SensorConfig
 from navsim.planning.metric_caching.metric_cache import MetricCache
 
+logger = logging.getLogger(__name__)
+
 FrameList = List[Dict[str, Any]]
+
+
+def _log_has_nonempty_camera_blob(root: Path, log_name: str, camera_subdir: str) -> bool:
+    cam_dir = root / log_name / camera_subdir
+    if not cam_dir.is_dir():
+        return False
+    try:
+        next(cam_dir.iterdir())
+    except StopIteration:
+        return False
+    return True
+
+
+def _intersect_log_names_with_sensor_dirs(
+    scene_filter: SceneFilter,
+    original_sensor_path: Optional[Path],
+    synthetic_sensor_path: Optional[Path],
+) -> SceneFilter:
+    if not scene_filter.restrict_to_available_sensor_logs or not scene_filter.log_names:
+        return scene_filter
+    roots = [p for p in (original_sensor_path, synthetic_sensor_path) if p is not None and p.is_dir()]
+    if not roots:
+        return scene_filter
+    per_root = [{d.name for d in root.iterdir() if d.is_dir()} for root in roots]
+    allowed = set.intersection(*per_root)
+    if scene_filter.restrict_log_names_to_complete_camera_blobs:
+        cam_sub = scene_filter.sensor_blob_completeness_camera_subdir
+        for root in roots:
+            allowed = {ln for ln in allowed if _log_has_nonempty_camera_blob(root, ln, cam_sub)}
+    before = len(scene_filter.log_names)
+    new_names = [ln for ln in scene_filter.log_names if ln in allowed]
+    logger.info(
+        "restrict_to_available_sensor_logs: %d -> %d logs (intersection of %s; complete_cam=%s)",
+        before,
+        len(new_names),
+        roots,
+        scene_filter.restrict_log_names_to_complete_camera_blobs,
+    )
+    return replace(scene_filter, log_names=new_names)
 
 
 def filter_scenes(data_path: Path, scene_filter: SceneFilter) -> Tuple[Dict[str, FrameList], List[str]]:
@@ -128,6 +171,9 @@ class SceneLoader:
         :param sensor_config: dataclass for sensor loading specification, defaults to no sensors
         """
 
+        scene_filter = _intersect_log_names_with_sensor_dirs(
+            scene_filter, original_sensor_path, synthetic_sensor_path
+        )
         self.scene_frames_dicts, stage1_scenes_final_frames_tokens = filter_scenes(data_path, scene_filter)
         self._synthetic_sensor_path = synthetic_sensor_path
         self._original_sensor_path = original_sensor_path
@@ -244,6 +290,7 @@ class SceneLoader:
                 num_history_frames=self._scene_filter.num_history_frames,
                 num_future_frames=self._scene_filter.num_future_frames,
                 sensor_config=self._sensor_config,
+                fallback_sensor_blobs_path=self._synthetic_sensor_path,
             )
 
     def get_agent_input_from_token(self, token: str) -> AgentInput:
@@ -265,6 +312,7 @@ class SceneLoader:
                 self._original_sensor_path,
                 num_history_frames=self._scene_filter.num_history_frames,
                 sensor_config=self._sensor_config,
+                fallback_sensor_blobs_path=self._synthetic_sensor_path,
             )
 
     def get_tokens_list_per_log(self) -> Dict[str, List[str]]:

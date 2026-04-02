@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Tuple
 from collections import defaultdict
 from tqdm import tqdm
 
+from navsim.common.dataloader import _intersect_log_names_with_sensor_dirs
 from navsim.common.dataclasses import AgentInput, Scene, SceneFilter, SensorConfig
 from navsim.planning.metric_caching.metric_cache import MetricCache
 
@@ -131,6 +132,9 @@ class SceneLoader:
         :param sensor_config: dataclass for sensor loading specification, defaults to no sensors
         """
 
+        scene_filter = _intersect_log_names_with_sensor_dirs(
+            scene_filter, original_sensor_path, synthetic_sensor_path
+        )
         self.scene_frames_dicts = filter_scenes(data_path, scene_filter)
         self._synthetic_sensor_path = synthetic_sensor_path
         self._original_sensor_path = original_sensor_path
@@ -248,6 +252,7 @@ class SceneLoader:
                 num_history_frames=self._scene_filter.num_history_frames,
                 num_future_frames=self._scene_filter.num_future_frames,
                 sensor_config=self._sensor_config,
+                fallback_sensor_blobs_path=self._synthetic_sensor_path,
             )
 
     def get_agent_input_from_token(self, token: str) -> AgentInput:
@@ -270,6 +275,7 @@ class SceneLoader:
                 self._original_sensor_path,
                 num_history_frames=self._scene_filter.num_history_frames,
                 sensor_config=self._sensor_config,
+                fallback_sensor_blobs_path=self._synthetic_sensor_path,
             )
 
     def get_tokens_list_per_log(self) -> Dict[str, List[str]]:

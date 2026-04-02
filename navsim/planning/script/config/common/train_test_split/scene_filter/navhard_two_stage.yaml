@@ -6,6 +6,9 @@ frame_interval: 1
 has_route: true
 max_scenes: null
 include_synthetic_scenes: true
+# Partial OpenScene downloads (e.g. a few HF shards): only evaluate logs present with full CAM_F0 under both roots.
+restrict_to_available_sensor_logs: true
+restrict_log_names_to_complete_camera_blobs: true
 log_names:
 - '2021.05.25.14.16.10_veh-35_01100_01664'
 - '2021.05.25.14.16.10_veh-35_01690_02183'

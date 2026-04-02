@@ -1,0 +1,17 @@
+_target_: navsim.agents.openpilot.op_agent.OpenpilotAgent
+_convert_: "all"
+
+# Override directory with env OPENPILOT_MODELD_MODELS or set agent.vision_model_path / policy_model_path.
+# FP32 vision avoids FP16 overflow in the 1576-D output on NAVSIM frames (see scripts/openpilot/convert_driving_vision_fp16_to_fp32.py).
+vision_model_path: /home/getpanked/projects/navsim_workspace/checkpoints/driving_vision_fp32.onnx
+policy_model_path: /home/getpanked/projects/navsim_workspace/checkpoints/driving_policy.onnx
+
+# Optional: different EP list for vision only (default: same as ``providers``).
+# sanitize_vision_outputs: true  # last resort only; prefer FP32 vision instead of masking NaN/Inf
+
+trajectory_sampling:
+  _target_: nuplan.planning.simulation.trajectory.trajectory_sampling.TrajectorySampling
+  _convert_: "all"
+  time_horizon: 4
+  interval_length: 0.5
+

@@ -1,6 +1,6 @@
 TRAIN_TEST_SPLIT=navhard_two_stage
-CHECKPOINT=/path/to/ego_status_mlp.ckpt
-CACHE_PATH=YOUR_PATH_TO_METRIC_CACHE
+CHECKPOINT=checkpoints/ego_status_mlp_seed_0.ckpt
+CACHE_PATH=$HOME/projects/navsim_workspace/exp/metric_cache
 SYNTHETIC_SENSOR_PATH=$OPENSCENE_DATA_ROOT/navhard_two_stage/sensor_blobs
 SYNTHETIC_SCENES_PATH=$OPENSCENE_DATA_ROOT/navhard_two_stage/synthetic_scene_pickles
 

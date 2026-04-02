@@ -29,6 +29,47 @@ NAVSIM_INTERVAL_LENGTH: float = 0.5
 OPENSCENE_DATA_ROOT = os.environ.get("OPENSCENE_DATA_ROOT")
 NUPLAN_MAPS_ROOT = os.environ.get("NUPLAN_MAPS_ROOT")
 
+# Split folder names used in OpenScene camera `data_path` when the root is `sensor_blobs/` (not `sensor_blobs/<split>/`).
+_KNOWN_SENSOR_BLOB_SPLIT_PREFIXES = frozenset({"test", "train", "mini", "val"})
+
+
+def resolve_sensor_file_path(
+    primary_root: Path,
+    relative_path: Union[str, Path],
+    fallback_root: Optional[Path],
+) -> Path:
+    """
+    Resolve a sensor file under primary_root; if missing, try fallback_root with the same relative path,
+    or without a leading split folder (e.g. test/) when blobs live under a flat navhard layout.
+    """
+    rel = Path(relative_path)
+    primary_full = primary_root / rel
+    if primary_full.is_file():
+        return primary_full
+    if fallback_root is None or fallback_root == primary_root:
+        return primary_full
+    alt = fallback_root / rel
+    if alt.is_file():
+        return alt
+    if rel.parts and rel.parts[0] in _KNOWN_SENSOR_BLOB_SPLIT_PREFIXES:
+        stripped = Path(*rel.parts[1:])
+        alt2 = fallback_root / stripped
+        if alt2.is_file():
+            return alt2
+    # Optional full OpenScene tree (e.g. sensor_blobs/test/<log>/...) when navhard mirror is incomplete.
+    if OPENSCENE_DATA_ROOT:
+        sr = Path(OPENSCENE_DATA_ROOT)
+        for base in (sr, sr / "sensor_blobs"):
+            cand = base / rel
+            if cand.is_file():
+                return cand
+        if rel.parts and rel.parts[0] not in _KNOWN_SENSOR_BLOB_SPLIT_PREFIXES:
+            for split in _KNOWN_SENSOR_BLOB_SPLIT_PREFIXES:
+                cand = sr / "sensor_blobs" / split / rel
+                if cand.is_file():
+                    return cand
+    return primary_full
+
 
 @dataclass
 class Camera:
@@ -63,12 +104,14 @@ class Cameras:
         sensor_blobs_path: Path,
         camera_dict: Dict[str, Any],
         sensor_names: List[str],
+        fallback_sensor_blobs_path: Optional[Path] = None,
     ) -> Cameras:
         """
         Load camera dataclass from dictionary.
         :param sensor_blobs_path: root directory of sensor data.
         :param camera_dict: dictionary containing camera specifications.
         :param sensor_names: list of camera identifiers to include.
+        :param fallback_sensor_blobs_path: optional alternate root (e.g. navhard_two_stage blobs).
         :return: Cameras dataclass.
         """
 
@@ -76,7 +119,11 @@ class Cameras:
         for camera_name in camera_dict.keys():
             camera_identifier = camera_name.lower()
             if camera_identifier in sensor_names:
-                image_path = sensor_blobs_path / camera_dict[camera_name]["data_path"]
+                image_path = resolve_sensor_file_path(
+                    sensor_blobs_path,
+                    camera_dict[camera_name]["data_path"],
+                    fallback_sensor_blobs_path,
+                )
                 data_dict[camera_identifier] = Camera(
                     image=np.array(Image.open(image_path)),
                     sensor2lidar_rotation=camera_dict[camera_name]["sensor2lidar_rotation"],
@@ -117,18 +164,27 @@ class Lidar:
             return io.BytesIO(fp.read())
 
     @classmethod
-    def from_paths(cls, sensor_blobs_path: Path, lidar_path: Path, sensor_names: List[str]) -> Lidar:
+    def from_paths(
+        cls,
+        sensor_blobs_path: Path,
+        lidar_path: Path,
+        sensor_names: List[str],
+        fallback_sensor_blobs_path: Optional[Path] = None,
+    ) -> Lidar:
         """
         Loads lidar point cloud dataclass in log loading.
         :param sensor_blobs_path: root directory to sensor data
         :param lidar_path: relative lidar path from logs.
         :param sensor_names: list of sensor identifiers to load`
+        :param fallback_sensor_blobs_path: optional alternate root for merged lidar files.
         :return: lidar point cloud dataclass
         """
 
         # NOTE: this could be extended to load specific LiDARs in the merged pc
         if "lidar_pc" in sensor_names:
-            global_lidar_path = sensor_blobs_path / lidar_path
+            global_lidar_path = resolve_sensor_file_path(
+                sensor_blobs_path, lidar_path, fallback_sensor_blobs_path
+            )
             lidar_pc = LidarPointCloud.from_buffer(cls._load_bytes(global_lidar_path), "pcd").points
             return Lidar(lidar_pc, lidar_path)
         return Lidar()  # empty lidar
@@ -160,6 +216,7 @@ class AgentInput:
         sensor_blobs_path: Path,
         num_history_frames: int,
         sensor_config: SensorConfig,
+        fallback_sensor_blobs_path: Optional[Path] = None,
     ) -> AgentInput:
         """
         Load agent input from scene dictionary.
@@ -167,6 +224,7 @@ class AgentInput:
         :param sensor_blobs_path: root directory of sensor data
         :param num_history_frames: number of agent input frames
         :param sensor_config: sensor config dataclass
+        :param fallback_sensor_blobs_path: optional alternate sensor root for stage-one log scenes.
         :return: agent input dataclass
         """
         assert len(scene_dict_list) > 0, "Scene list is empty!"
@@ -211,6 +269,7 @@ class AgentInput:
                     sensor_blobs_path=sensor_blobs_path,
                     camera_dict=scene_dict_list[frame_idx]["cams"],
                     sensor_names=sensor_names,
+                    fallback_sensor_blobs_path=fallback_sensor_blobs_path,
                 )
             )
 
@@ -219,6 +278,7 @@ class AgentInput:
                     sensor_blobs_path=sensor_blobs_path,
                     lidar_path=Path(scene_dict_list[frame_idx]["lidar_path"]) if scene_dict_list[frame_idx]["lidar_path"] is not None else None,
                     sensor_names=sensor_names,
+                    fallback_sensor_blobs_path=fallback_sensor_blobs_path,
                 )
             )
 
@@ -477,6 +537,7 @@ class Scene:
         num_history_frames: int,
         num_future_frames: int,
         sensor_config: SensorConfig,
+        fallback_sensor_blobs_path: Optional[Path] = None,
     ) -> Scene:
         """
         Load scene dataclass from scene dictionary list (for log loading).
@@ -485,6 +546,7 @@ class Scene:
         :param num_history_frames: number of past and current frames to load
         :param num_future_frames: number of future frames to load
         :param sensor_config: sensor config dataclass
+        :param fallback_sensor_blobs_path: optional alternate sensor root for log scenes.
         :return: scene dataclass
         """
         assert len(scene_dict_list) >= 0, "Scene list is empty!"
@@ -509,12 +571,14 @@ class Scene:
                 sensor_blobs_path=sensor_blobs_path,
                 camera_dict=scene_dict_list[frame_idx]["cams"],
                 sensor_names=sensor_names,
+                fallback_sensor_blobs_path=fallback_sensor_blobs_path,
             )
 
             lidar = Lidar.from_paths(
                 sensor_blobs_path=sensor_blobs_path,
                 lidar_path=Path(scene_dict_list[frame_idx]["lidar_path"]),
                 sensor_names=sensor_names,
+                fallback_sensor_blobs_path=fallback_sensor_blobs_path,
             )
 
             frame = Frame(
@@ -539,6 +603,7 @@ class Scene:
         num_history_frames: int,
         num_future_frames: int,
         sensor_config: SensorConfig,
+        fallback_sensor_blobs_path: Optional[Path] = None,
     ) -> Scene:
         """
         Load scene dataclass from scene dictionary list (for log loading).
@@ -547,6 +612,7 @@ class Scene:
         :param num_history_frames: number of past and current frames to load
         :param num_future_frames: number of future frames to load
         :param sensor_config: sensor config dataclass
+        :param fallback_sensor_blobs_path: optional alternate sensor root for log scenes.
         :return: scene dataclass
         """
         assert len(scene_dict_list) >= 0, "Scene list is empty!"
@@ -593,6 +659,7 @@ class Scene:
                 sensor_blobs_path=sensor_blobs_path,
                 camera_dict=scene_dict_list[frame_idx]["cams"],
                 sensor_names=sensor_names,
+                fallback_sensor_blobs_path=fallback_sensor_blobs_path,
             )
 
             frame = Frame(
@@ -749,6 +816,14 @@ class SceneFilter:
     # for reactive and non_reactive
     reactive_synthetic_initial_tokens: Optional[List[str]] = None
     non_reactive_synthetic_initial_tokens: Optional[List[str]] = None
+
+    # If True, SceneLoader intersects log_names with subdirs under sensor roots (partial NavHard download).
+    restrict_to_available_sensor_logs: bool = False
+
+    # If True (with restrict_to_available_sensor_logs), keep only logs that have a non-empty camera folder
+    # (default CAM_F0) under every sensor root. Avoids stubs from partial HuggingFace shards.
+    restrict_log_names_to_complete_camera_blobs: bool = False
+    sensor_blob_completeness_camera_subdir: str = "CAM_F0"
 
     # TODO: expand filter options
 

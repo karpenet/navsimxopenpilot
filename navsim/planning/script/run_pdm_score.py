@@ -249,6 +249,10 @@ def calculate_individual_mapping_scores(
     Returns:
         Average score calculated using group multiplication
     """
+    if not all_mappings:
+        nan_summary = pd.Series({"score": np.nan})
+        return nan_summary.copy(), nan_summary.copy(), nan_summary.copy()
+
     all_group_scores = []
     stage1_group_scores = []
     stage2_group_scores = []
@@ -276,17 +280,25 @@ def calculate_individual_mapping_scores(
         stage2_group_scores.append(group1_stage2_scores)
         stage2_group_scores.append(group2_stage2_scores)
 
-        group1_scores = group1_stage1_scores * group1_stage2_scores
-
-        group2_scores = group2_stage1_scores * group2_stage2_scores
-
-        avg_scores = (group1_scores + group2_scores) / 2
+        has_s2_g1 = not group1_stage2_df.empty
+        has_s2_g2 = not group2_stage2_df.empty
+        if has_s2_g1 and has_s2_g2:
+            group1_scores = group1_stage1_scores * group1_stage2_scores
+            group2_scores = group2_stage1_scores * group2_stage2_scores
+            avg_scores = (group1_scores + group2_scores) / 2
+        elif has_s2_g1 or has_s2_g2:
+            left = group1_stage1_scores * group1_stage2_scores if has_s2_g1 else group1_stage1_scores
+            right = group2_stage1_scores * group2_stage2_scores if has_s2_g2 else group2_stage1_scores
+            avg_scores = (left + right) / 2
+        else:
+            # Partial dataset: no scored second-stage tokens for this mapping — use first stage only.
+            avg_scores = (group1_stage1_scores + group2_stage1_scores) / 2
         all_group_scores.append(avg_scores)
 
     return (
-        pd.DataFrame(all_group_scores).mean(),
-        pd.DataFrame(stage1_group_scores).mean(),
-        pd.DataFrame(stage2_group_scores).mean(),
+        pd.DataFrame(all_group_scores).mean(skipna=True),
+        pd.DataFrame(stage1_group_scores).mean(skipna=True),
+        pd.DataFrame(stage2_group_scores).mean(skipna=True),
     )
 
 
@@ -314,8 +326,21 @@ def create_scene_aggregators(
 
         all_updates.append(updated_rows)
 
-    all_updates_df = pd.concat(all_updates, ignore_index=True).set_index("token")
-    full_score_df.update(all_updates_df)
+    if all_updates:
+        all_updates_df = pd.concat(all_updates, ignore_index=True).set_index("token")
+        full_score_df.update(all_updates_df)
+
+    missing_comfort = full_score_df["two_frame_extended_comfort"].isna()
+    if missing_comfort.any():
+        logger.warning(
+            "two_frame_extended_comfort still missing for %d token(s) after aggregation. "
+            "Common cause: partial test data (e.g. only some navtest / metric-cache shards). "
+            "Using 1.0 for those rows so scoring can finish.",
+            int(missing_comfort.sum()),
+        )
+        full_score_df.loc[missing_comfort, "two_frame_extended_comfort"] = 1.0
+    full_score_df["weight"] = full_score_df["weight"].fillna(1.0)
+
     full_score_df.reset_index(inplace=True)
     full_score_df = full_score_df.drop(columns=["ego_simulated_states"])
 
@@ -335,9 +360,9 @@ def main(cfg: DictConfig) -> None:
     # Extract scenes based on scene-loader to know which tokens to distribute across workers
     # TODO: infer the tokens per log from metadata, to not have to load metric cache and scenes here
     scene_loader = SceneLoader(
-        synthetic_sensor_path=None,
-        original_sensor_path=None,
         data_path=Path(cfg.navsim_log_path),
+        original_sensor_path=Path(cfg.original_sensor_path),
+        synthetic_sensor_path=Path(cfg.synthetic_sensor_path),
         synthetic_scenes_path=Path(cfg.synthetic_scenes_path),
         scene_filter=instantiate(cfg.train_test_split.scene_filter),
         sensor_config=SensorConfig.build_no_sensors(),
@@ -372,6 +397,21 @@ def main(cfg: DictConfig) -> None:
             if prev_token in set(scene_loader.tokens) or orig_token in set(scene_loader.tokens):
                 all_mappings[(orig_token, prev_token)] = [tuple(pair) for pair in two_stage_pairs]
 
+        scored_tokens = set(pdm_score_df["token"])
+        n_maps = len(all_mappings)
+        all_mappings = {
+            k: v
+            for k, v in all_mappings.items()
+            if k[0] in scored_tokens and k[1] in scored_tokens
+        }
+        if len(all_mappings) < n_maps:
+            logger.warning(
+                "Dropped %d reactive mapping(s) whose first-stage (orig, prev) pair was not both scored "
+                "(partial metric cache / shards). Keeping %d mapping(s).",
+                n_maps - len(all_mappings),
+                len(all_mappings),
+            )
+
         pdm_score_df = create_scene_aggregators(
             all_mappings, pdm_score_df, instantiate(cfg.simulator.proposal_sampling)
         )
@@ -403,6 +443,12 @@ def main(cfg: DictConfig) -> None:
     pcl_group_score, pcl_stage1_score, pcl_stage2_score = calculate_individual_mapping_scores(
         pdm_score_df[score_cols + ["token", "weight"]], all_mappings
     )
+
+    if "frame_type" in pdm_score_df.columns:
+        n_scored_stage1 = int((pdm_score_df["frame_type"] == SceneFrameType.ORIGINAL).sum())
+        n_scored_stage2 = int((pdm_score_df["frame_type"] == SceneFrameType.SYNTHETIC).sum())
+    else:
+        n_scored_stage1 = n_scored_stage2 = 0
 
     for col in score_cols:
         stage_one_mask = pdm_score_df["frame_type"] == SceneFrameType.ORIGINAL
@@ -461,12 +507,20 @@ def main(cfg: DictConfig) -> None:
     timestamp = datetime.now().strftime("%Y.%m.%d.%H.%M.%S")
     pdm_score_df.to_csv(save_path / f"{timestamp}.csv")
 
+    _tok = pdm_score_df["token"].astype(str)
+    mean_scene_pdm = pd.to_numeric(
+        pdm_score_df.loc[~_tok.str.startswith("extended_"), "score"], errors="coerce"
+    ).mean()
+    ext_combined = pdm_score_df.loc[pdm_score_df["token"] == "extended_pdm_score_combined", "score"].iloc[0]
+
     logger.info(
         f"""
         Finished running evaluation.
             Number of successful scenarios: {num_sucessful_scenarios}.
             Number of failed scenarios: {num_failed_scenarios}.
-            Final extended pdm score of valid results: {pdm_score_df[pdm_score_df["token"] == "extended_pdm_score_combined"]["score"].iloc[0]}.
+            Per-scene rows scored — stage 1 (original): {n_scored_stage1}, stage 2 (reactive synthetic): {n_scored_stage2}.
+            Extended PDM score (mapping-averaged pseudo closed-loop): {ext_combined}.
+            Mean PDM score over all scored scenes: {mean_scene_pdm}.
             Results are stored in: {save_path / f"{timestamp}.csv"}.
         """
     )

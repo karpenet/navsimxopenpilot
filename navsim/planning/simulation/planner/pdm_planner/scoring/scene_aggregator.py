@@ -77,6 +77,11 @@ class SceneAggregator:
         return two_frame_comfort
 
     def aggregate_scores(self, one_stage_only=False) -> pd.DataFrame:
+        if self.now_frame not in self.score_df.index or self.previous_frame not in self.score_df.index:
+            if one_stage_only:
+                return pd.DataFrame(columns=["token", "two_frame_extended_comfort"])
+            return pd.DataFrame(columns=["token", "two_frame_extended_comfort", "weight"])
+
         updates = []
 
         if one_stage_only:
@@ -90,15 +95,25 @@ class SceneAggregator:
             updates.append({"token": self.previous_frame, "two_frame_extended_comfort": main_comfort, "weight": 1.0})
 
             # =====Second stage=====
+            # Pairs may reference scenes not present locally (e.g. partial navtest shards / metric cache).
+            second_stage_pairs = list(self.second_stage) if self.second_stage else []
+            second_stage_filtered = [
+                (pair[0], pair[1])
+                for pair in second_stage_pairs
+                if len(pair) >= 2 and pair[0] in self.score_df.index and pair[1] in self.score_df.index
+            ]
+            if not second_stage_filtered:
+                return pd.DataFrame(updates)
+
             # t = 0s and t = 4s
-            second_stage_now_tokens = [pair[0] for pair in self.second_stage]
+            second_stage_now_tokens = [pair[0] for pair in second_stage_filtered]
             second_stage_now_scores = self.score_df.loc[second_stage_now_tokens]
 
             first_stage_now_row = self.score_df.loc[self.now_frame]
             weights_now = self.calculate_pseudo_closed_loop_weights(first_stage_now_row, second_stage_now_scores)
 
             # t = -0.5s and t = 3.5s
-            second_stage_prev_tokens = [pair[1] for pair in self.second_stage]
+            second_stage_prev_tokens = [pair[1] for pair in second_stage_filtered]
             second_stage_prev_scores = self.score_df.loc[second_stage_prev_tokens]
 
             first_stage_prev_row = self.score_df.loc[self.previous_frame]
@@ -108,7 +123,7 @@ class SceneAggregator:
 
             weight_map = dict(zip(weights["token"], weights["weight"]))
 
-            for (now_token, prev_token) in self.second_stage:
+            for (now_token, prev_token) in second_stage_filtered:
 
                 two_frame_comfort = self._compute_two_frame_comfort(now_token, prev_token)
                 weight_now = weight_map[now_token]

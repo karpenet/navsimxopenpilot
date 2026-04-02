@@ -1,8 +1,8 @@
 TRAIN_TEST_SPLIT=navhard_two_stage
-CHECKPOINT=/path/to/ltf.ckpt
-CACHE_PATH=YOUR_PATH_TO_METRIC_CACHE
-SYNTHETIC_SENSOR_PATH=$OPENSCENE_DATA_ROOT/navhard_two_stage/sensor_blobs
-SYNTHETIC_SCENES_PATH=$OPENSCENE_DATA_ROOT/navhard_two_stage/synthetic_scene_pickles
+CHECKPOINT=checkpoints/ltf_seed_0.ckpt
+CACHE_PATH=$HOME/projects/navsim_workspace/exp/metric_cache
+SYNTHETIC_SENSOR_PATH=$HOME/projects/navsim_workspace/dataset/navhard_two_stage/sensor_blobs
+SYNTHETIC_SCENES_PATH=$HOME/projects/navsim_workspace/dataset/navhard_two_stage/synthetic_scene_pickles
 
 python $NAVSIM_DEVKIT_ROOT/navsim/planning/script/run_pdm_score.py \
 train_test_split=$TRAIN_TEST_SPLIT \
